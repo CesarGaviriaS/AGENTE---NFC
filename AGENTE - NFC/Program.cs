@@ -28,7 +28,7 @@ class Program
     {
         Console.WriteLine("--- Agente NFC v9.1 (Análisis Inteligente) by GAVO ---");
 
-        const string hubUrl = "https://localhost:44342/nfcHub";
+        const string hubUrl = "https://localhost:7280/nfcHub";
         connection = new HubConnectionBuilder()
             .WithUrl(hubUrl)
             .WithAutomaticReconnect()
