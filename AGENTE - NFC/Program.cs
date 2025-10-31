@@ -136,7 +136,10 @@ class Program
         if (!string.IsNullOrEmpty(contenido))
         {
             Console.WriteLine($"Contenido extraído: '{contenido}'. Transmitiendo...");
-            await connection.InvokeAsync("TransmitirDatosTag", contenido);
+            await connection.InvokeAsync("ProcesarLecturaTag", contenido);
+
+
+
         }
         else
         {
