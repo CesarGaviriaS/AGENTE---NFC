@@ -1,12 +1,14 @@
-﻿using Microsoft.AspNetCore.SignalR.Client;
+﻿// --- Agente NFC (actualizado Wilmar) ---
+using Microsoft.AspNetCore.SignalR.Client;
 using PCSC;
 using PCSC.Iso7816;
 using PCSC.Monitoring;
 using System;
 using System.Collections.Generic;
-using System.Linq;
+using System.Net.Http;
 using System.Text;
-using System.Text.RegularExpressions; // <-- AÑADIDO: Para usar expresiones regulares
+using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 
 public enum AgentMode
@@ -26,7 +28,7 @@ class Program
 
     static async Task Main(string[] args)
     {
-        Console.WriteLine("--- Agente NFC v9.1 (Análisis Inteligente) by GAVO ---");
+        Console.WriteLine("--- Agente NFC v10.1 (con mensajes visuales y registros corregidos) ---");
 
         const string hubUrl = "https://localhost:7280/nfcHub";
         connection = new HubConnectionBuilder()
@@ -34,200 +36,174 @@ class Program
             .WithAutomaticReconnect()
             .Build();
 
-        // --- Handlers de SignalR (sin cambios) ---
+        // Eventos desde SignalR
         connection.On<string>("RequestWriteMode", (data) =>
         {
             currentMode = AgentMode.AWAITING_TAG_FOR_WRITE;
             dataToWrite = data;
             Console.ForegroundColor = ConsoleColor.Yellow;
-            Console.WriteLine($"\n[MODO CAMBIADO] -> AWAITING_TAG_FOR_WRITE. Datos a escribir: '{data}'");
+            Console.WriteLine($"\n[MODO CAMBIADO] -> WRITE. Datos: '{data}'");
             Console.ResetColor();
-            connection.InvokeAsync("SendStatusUpdate", "Agente listo. Acerque el tag que desea grabar.", "info");
         });
 
         connection.On("RequestCleanMode", () =>
         {
             currentMode = AgentMode.AWAITING_TAG_FOR_CLEAN;
-            dataToWrite = null;
             Console.ForegroundColor = ConsoleColor.Magenta;
-            Console.WriteLine("\n[MODO CAMBIADO] -> AWAITING_TAG_FOR_CLEAN");
+            Console.WriteLine("\n[MODO CAMBIADO] -> CLEAN");
             Console.ResetColor();
-            connection.InvokeAsync("SendStatusUpdate", "Agente listo. Acerque el tag que desea limpiar.", "warning");
         });
 
         connection.On("RequestReadMode", () =>
         {
             currentMode = AgentMode.CONTINUOUS_READ;
-            dataToWrite = null;
             Console.ForegroundColor = ConsoleColor.Cyan;
-            Console.WriteLine("\n[MODO CAMBIADO] -> CONTINUOUS_READ");
+            Console.WriteLine("\n[MODO CAMBIADO] -> READ");
             Console.ResetColor();
         });
 
         await ConnectToHub();
 
-        try
+        // Inicializar lector
+        context = ContextFactory.Instance.Establish(SCardScope.System);
+        var readers = context.GetReaders();
+        if (readers == null || readers.Length == 0)
         {
-            context = ContextFactory.Instance.Establish(SCardScope.System);
-            var readerNames = context.GetReaders();
-            if (readerNames == null || readerNames.Length == 0)
-            {
-                Console.WriteLine("ERROR: No se encontraron lectores NFC.");
-                Console.ReadKey();
-                return;
-            }
-
-            Console.WriteLine($"Lector encontrado: {readerNames[0]}");
-            var monitor = new SCardMonitor(ContextFactory.Instance, SCardScope.System);
-            monitor.CardInserted += OnCardInserted;
-            monitor.Start(readerNames);
-
-            Console.WriteLine("\n--- Agente en modo de Lectura Continua por defecto ---");
-            Console.WriteLine("Presione Enter para salir...");
-            Console.ReadLine();
+            Console.WriteLine("❌ No se encontraron lectores NFC.");
+            return;
         }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error al inicializar lector: {ex.Message}");
-            Console.ReadKey();
-        }
+
+        Console.WriteLine($"📶 Lector detectado: {readers[0]}");
+        var monitor = new SCardMonitor(ContextFactory.Instance, SCardScope.System);
+        monitor.CardInserted += OnCardInserted;
+        monitor.Start(readers);
+
+        Console.WriteLine("\nEsperando tags... (ENTER para salir)");
+        Console.ReadLine();
     }
 
-    private static async void OnCardInserted(object? sender, CardStatusEventArgs args)
+    private static async void OnCardInserted(object? sender, CardStatusEventArgs e)
     {
         if (connection?.State != HubConnectionState.Connected) return;
-        Console.WriteLine($"\n[Tag Detectado en modo: {currentMode}]");
+
+        using var reader = new SCardReader(context);
+        if (reader.Connect(e.ReaderName, SCardShareMode.Shared, SCardProtocol.Any) != SCardError.Success)
+        {
+            Console.WriteLine("No se pudo conectar al tag.");
+            return;
+        }
+
+        switch (currentMode)
+        {
+            case AgentMode.CONTINUOUS_READ:
+                await HandleRead(reader);
+                break;
+            case AgentMode.AWAITING_TAG_FOR_WRITE:
+                await HandleWrite(reader);
+                break;
+            case AgentMode.AWAITING_TAG_FOR_CLEAN:
+                await HandleClean(reader);
+                break;
+        }
+    }
+
+    // === LECTURA ===
+    private static async Task HandleRead(ISCardReader reader)
+    {
+        string? contenido = LeerContenidoDelTag(reader);
+        if (!string.IsNullOrEmpty(contenido))
+        {
+            Console.WriteLine($"🟢 Tag leído: {contenido}");
+            await connection.InvokeAsync("ProcesarLecturaTag", contenido);
+            await connection.InvokeAsync("SendTagEvent", "TagLeido", $"Tag leído: {contenido}");
+        }
+        else
+        {
+            await connection.InvokeAsync("SendTagEvent", "TagLeido", "⚠️ Tag vacío o formato inválido (esperado: '1,6').");
+        }
+    }
+
+    // === ESCRITURA ===
+    private static async Task HandleWrite(ISCardReader reader)
+    {
+        Console.WriteLine($"✏️ Escribiendo: {dataToWrite}");
+        bool success = EscribirContenidoEnTag(reader, dataToWrite);
+        if (!success)
+        {
+            Console.WriteLine("❌ Error al escribir el tag.");
+            await connection.InvokeAsync("SendTagEvent", "TagGrabado", "❌ Error al escribir el tag.");
+            return;
+        }
+
+        string? verifiedData = LeerContenidoDelTag(reader);
+        if (verifiedData == dataToWrite)
+        {
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine("✅ Tag grabado y verificado con éxito.");
+            Console.ResetColor();
+
+            await RegistrarTagEnBackend(verifiedData);
+            await connection.InvokeAsync("SendTagEvent", "TagGrabado", $"✅ Tag grabado y verificado: {verifiedData}");
+            await connection.InvokeAsync("SendOperationSuccess", "Tag grabado correctamente.", verifiedData);
+
+            currentMode = AgentMode.CONTINUOUS_READ;
+            Console.WriteLine("🔁 Volviendo a modo lectura.");
+        }
+        else
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"❌ Verificación fallida. Esperado: '{dataToWrite}', leído: '{verifiedData}'");
+            Console.ResetColor();
+            await connection.InvokeAsync("SendTagEvent", "TagGrabado", "❌ Verificación fallida.");
+        }
+    }
+
+    // === LIMPIAR ===
+    private static async Task HandleClean(ISCardReader reader)
+    {
+        Console.WriteLine("🧹 Limpiando tag...");
+        bool success = EscribirContenidoEnTag(reader, "");
+        if (success)
+        {
+            Console.WriteLine("✅ Tag limpiado.");
+            await connection.InvokeAsync("SendTagEvent", "TagLimpiado", "✅ Tag limpiado correctamente.");
+            await connection.InvokeAsync("SendOperationSuccess", "Tag limpiado.", "");
+            currentMode = AgentMode.CONTINUOUS_READ;
+        }
+    }
+
+    // === REGISTRO EN BACKEND ===
+    private static async Task RegistrarTagEnBackend(string codigo)
+    {
         try
         {
-            using var reader = new SCardReader(context);
-            if (reader.Connect(args.ReaderName, SCardShareMode.Shared, SCardProtocol.Any) != SCardError.Success)
-            {
-                Console.WriteLine("No se pudo conectar al tag.");
-                return;
-            }
-            switch (currentMode)
-            {
-                case AgentMode.CONTINUOUS_READ:
-                    await HandleContinuousRead(reader);
-                    break;
-                case AgentMode.AWAITING_TAG_FOR_WRITE:
-                    await HandleWrite(reader);
-                    // El modo ahora se gestiona dentro de HandleWrite
-                    break;
-                case AgentMode.AWAITING_TAG_FOR_CLEAN:
-                    await HandleClean(reader);
-                    // El modo ahora se gestiona dentro de HandleClean
-                    break;
-                case AgentMode.IDLE:
-                    Console.WriteLine("Tag detectado en modo IDLE. Ignorando.");
-                    break;
-            }
+            using var client = new HttpClient { BaseAddress = new Uri("https://localhost:7280/") };
+
+            var partes = codigo.Split(',');
+            if (partes.Length != 2) return;
+
+            string tipoPersona = partes[0] == "1" ? "Aprendiz" : "Usuario";
+            int idPersona = int.Parse(partes[1]);
+
+            var body = new { CodigoTag = codigo, IdPersona = idPersona, TipoPersona = tipoPersona };
+            var json = JsonSerializer.Serialize(body);
+
+            var response = await client.PostAsync("api/TagAsignado",
+                new StringContent(json, Encoding.UTF8, "application/json"));
+
+            string respuesta = await response.Content.ReadAsStringAsync();
+            if (response.IsSuccessStatusCode)
+                Console.WriteLine($"🟢 Tag registrado en backend: {respuesta}");
+            else
+                Console.WriteLine($"⚠️ Falló el registro del tag: {respuesta}");
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error durante la operación con el tag: {ex.Message}");
-            await connection.InvokeAsync("SendOperationFailure", $"Error en el agente: {ex.Message}");
+            Console.WriteLine($"❌ Error registrando tag: {ex.Message}");
         }
     }
 
-    private static async Task HandleContinuousRead(ISCardReader reader)
-    {
-        string? contenido = LeerContenidoDelTag(reader); // Usa la nueva función inteligente
-        if (!string.IsNullOrEmpty(contenido))
-        {
-            Console.WriteLine($"Contenido extraído: '{contenido}'. Transmitiendo...");
-            await connection.InvokeAsync("ProcesarLecturaTag", contenido);
-
-
-
-        }
-        else
-        {
-            Console.WriteLine("No se encontró un formato de datos válido (ej: '1,6') en el tag.");
-        }
-    }
-
-    private static async Task HandleWrite(ISCardReader reader)
-    {
-        Console.WriteLine($"Intentando escribir: '{dataToWrite}'");
-        bool success = EscribirContenidoEnTag(reader, dataToWrite);
-        if (success)
-        {
-            Console.WriteLine("Escritura exitosa. Verificando...");
-            string? verifiedData = LeerContenidoDelTag(reader); // Usa la nueva función inteligente
-            if (verifiedData == dataToWrite)
-            {
-                Console.ForegroundColor = ConsoleColor.Green;
-                Console.WriteLine("Verificación exitosa.");
-                Console.ResetColor();
-                await connection.InvokeAsync("SendOperationSuccess", "Tag grabado y verificado con éxito.", verifiedData);
-
-                // CAMBIO SOLICITADO: Volver a modo lectura continua
-                currentMode = AgentMode.CONTINUOUS_READ;
-                Console.ForegroundColor = ConsoleColor.Cyan;
-                Console.WriteLine("\n[MODO CAMBIADO] -> CONTINUOUS_READ");
-                Console.ResetColor();
-            }
-            else
-            {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine($"Fallo de verificación. Leído: '{verifiedData}' | Esperado: '{dataToWrite}'");
-                Console.ResetColor();
-                await connection.InvokeAsync("SendOperationFailure", "Error: La verificación falló. El tag no se grabó correctamente.");
-                currentMode = AgentMode.IDLE; // Volver a inactivo en caso de fallo
-            }
-        }
-        else
-        {
-            Console.ForegroundColor = ConsoleColor.Red;
-            Console.WriteLine("Fallo en la escritura.");
-            Console.ResetColor();
-            await connection.InvokeAsync("SendOperationFailure", "Error: No se pudo escribir en el tag.");
-            currentMode = AgentMode.IDLE; // Volver a inactivo en caso de fallo
-        }
-    }
-
-    private static async Task HandleClean(ISCardReader reader)
-    {
-        Console.WriteLine("Intentando limpiar el tag...");
-        bool success = EscribirContenidoEnTag(reader, ""); // Escribir un string vacío
-        if (success)
-        {
-            Console.WriteLine("Limpieza exitosa. Verificando...");
-            string? verifiedData = LeerContenidoDelTag(reader);
-            if (string.IsNullOrEmpty(verifiedData))
-            {
-                Console.ForegroundColor = ConsoleColor.Green;
-                Console.WriteLine("Verificación de limpieza exitosa.");
-                Console.ResetColor();
-                await connection.InvokeAsync("SendOperationSuccess", "Tag limpiado y verificado con éxito.", "");
-
-                // CAMBIO SOLICITADO: Volver a modo lectura continua
-                currentMode = AgentMode.CONTINUOUS_READ;
-                Console.ForegroundColor = ConsoleColor.Cyan;
-                Console.WriteLine("\n[MODO CAMBIADO] -> CONTINUOUS_READ");
-                Console.ResetColor();
-            }
-            else
-            {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine($"Fallo de verificación. El tag no está vacío.");
-                Console.ResetColor();
-                await connection.InvokeAsync("SendOperationFailure", "Error: La verificación falló. El tag no se limpió correctamente.");
-                currentMode = AgentMode.IDLE; // Volver a inactivo en caso de fallo
-            }
-        }
-        else
-        {
-            Console.ForegroundColor = ConsoleColor.Red;
-            Console.WriteLine("Fallo en la limpieza.");
-            Console.ResetColor();
-            await connection.InvokeAsync("SendOperationFailure", "Error: No se pudo limpiar el tag.");
-            currentMode = AgentMode.IDLE; // Volver a inactivo en caso de fallo
-        }
-    }
-
-    // --- FUNCIÓN DE LECTURA ACTUALIZADA ---
+    // === UTILIDADES ===
     private static string? LeerContenidoDelTag(ISCardReader reader)
     {
         var allData = new List<byte>();
@@ -241,68 +217,43 @@ class Program
                 P2 = page,
                 Le = 4
             };
-            var response = Transmit(reader, apdu.ToArray());
-            if (response != null && response.SW1 == 0x90 && response.SW2 == 0x00)
-            {
-                allData.AddRange(response.GetData());
-            }
-            else
-            {
-                break; // Detener si una página falla
-            }
+            var resp = Transmit(reader, apdu.ToArray());
+            if (resp != null && resp.SW1 == 0x90) allData.AddRange(resp.GetData());
+            else break;
         }
-
-        if (allData.Count == 0) return null;
-
-        // 1. Convierte todos los bytes a un string, ignorando errores de conversión.
-        string rawText = Encoding.UTF8.GetString(allData.ToArray());
-
-        // 2. Usa una expresión regular para encontrar el primer patrón "número,número".
-        Match match = Regex.Match(rawText, @"\d+,\d+");
-
-        // 3. Si se encuentra, devuelve ese valor limpio. Si no, devuelve null.
+        string text = Encoding.UTF8.GetString(allData.ToArray());
+        var match = Regex.Match(text, @"\d+,\d+");
         return match.Success ? match.Value : null;
     }
 
-    // --- FUNCIÓN DE ESCRITURA ACTUALIZADA ---
     private static bool EscribirContenidoEnTag(ISCardReader reader, string? text)
     {
-        // Prepara un buffer del tamaño del área de usuario de un NTAG213 para asegurar que se sobrescriba todo.
         byte[] buffer = new byte[144];
-
         if (!string.IsNullOrEmpty(text))
         {
-            byte[] textBytes = Encoding.UTF8.GetBytes(text);
-            if (textBytes.Length > buffer.Length)
-            {
-                Console.WriteLine("Error: El texto es demasiado largo para el tag.");
-                return false;
-            }
-            // Copia los nuevos datos al principio del buffer. El resto quedará en ceros,
-            // lo que limpiará efectivamente los datos antiguos del tag.
-            Array.Copy(textBytes, buffer, textBytes.Length);
+            var bytes = Encoding.UTF8.GetBytes(text);
+            Array.Copy(bytes, buffer, bytes.Length);
         }
 
-        // Escribe el buffer completo página por página.
-        for (byte page = 4; page < 36; page++) // Páginas 4 a 35 son de usuario
+        for (byte page = 4; page < 36; page++)
         {
-            int index = (page - 4) * 4;
-            byte[] pageData = new byte[4];
-            Array.Copy(buffer, index, pageData, 0, 4);
+            int idx = (page - 4) * 4;
+            var data = new byte[4];
+            Array.Copy(buffer, idx, data, 0, 4);
 
             var apdu = new CommandApdu(IsoCase.Case3Short, reader.ActiveProtocol)
             {
                 CLA = 0xFF,
-                Instruction = (InstructionCode)0xD6, // WRITE BINARY
+                Instruction = (InstructionCode)0xD6,
                 P1 = 0x00,
                 P2 = page,
-                Data = pageData
+                Data = data
             };
 
-            var response = Transmit(reader, apdu.ToArray());
-            if (response == null || response.SW1 != 0x90)
+            var resp = Transmit(reader, apdu.ToArray());
+            if (resp == null || resp.SW1 != 0x90)
             {
-                Console.WriteLine($"Error escribiendo en la página {page}");
+                Console.WriteLine($"Error escribiendo página {page}");
                 return false;
             }
         }
@@ -313,12 +264,7 @@ class Program
     {
         var responseBuffer = new byte[256];
         var sc = reader.Transmit(SCardPCI.GetPci(reader.ActiveProtocol), command, ref responseBuffer);
-        if (sc != SCardError.Success)
-        {
-            Console.WriteLine("Error de transmisión PC/SC: " + sc);
-            return null;
-        }
-        return new ResponseApdu(responseBuffer, responseBuffer.Length, IsoCase.Case4Short, reader.ActiveProtocol);
+        return sc == SCardError.Success ? new ResponseApdu(responseBuffer, responseBuffer.Length, IsoCase.Case4Short, reader.ActiveProtocol) : null;
     }
 
     private static async Task ConnectToHub()
@@ -326,14 +272,13 @@ class Program
         try
         {
             await connection.StartAsync();
-            Console.WriteLine("Conexión con el Hub establecida.");
+            Console.WriteLine("✅ Conectado al Hub NFC.");
         }
-        catch (Exception ex)
+        catch
         {
-            Console.WriteLine($"Error al conectar con el Hub: {ex.Message}. Reintentando en 5s...");
+            Console.WriteLine("❌ Error al conectar. Reintentando...");
             await Task.Delay(5000);
             await ConnectToHub();
         }
     }
 }
-
