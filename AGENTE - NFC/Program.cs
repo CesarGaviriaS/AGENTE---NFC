@@ -162,15 +162,45 @@ class Program
     private static async Task HandleClean(ISCardReader reader)
     {
         Console.WriteLine("🧹 Limpiando tag...");
-        bool success = EscribirContenidoEnTag(reader, "");
-        if (success)
+
+        // 1. Leer el código actual del tag (ej: "1,6")
+        string? codigoActual = LeerContenidoDelTag(reader);
+        if (string.IsNullOrEmpty(codigoActual))
         {
-            Console.WriteLine("✅ Tag limpiado.");
-            await connection.InvokeAsync("SendTagEvent", "TagLimpiado", "✅ Tag limpiado correctamente.");
-            await connection.InvokeAsync("SendOperationSuccess", "Tag limpiado.", "");
+            Console.WriteLine("⚠️ El tag ya está vacío o no tiene un formato válido.");
+            await connection.InvokeAsync("SendTagEvent", "TagLimpiado", "⚠️ Tag vacío o sin asignación.");
             currentMode = AgentMode.CONTINUOUS_READ;
+            return;
         }
+
+        // 2. Limpiar físicamente el tag
+        bool success = EscribirContenidoEnTag(reader, "");
+        if (!success)
+        {
+            Console.WriteLine("❌ Error al limpiar físicamente el tag.");
+            await connection.InvokeAsync("SendTagEvent", "TagLimpiado", "❌ Error limpiando el contenido del tag.");
+            return;
+        }
+
+        // 3. Eliminar el registro en backend
+        bool backendOk = await EliminarTagEnBackend(codigoActual);
+
+        if (!backendOk)
+        {
+            Console.WriteLine("⚠️ Tag limpio físicamente, pero no se pudo eliminar en el backend.");
+            await connection.InvokeAsync("SendTagEvent", "TagLimpiado", "⚠️ Tag limpio, pero falló la eliminación en backend.");
+        }
+        else
+        {
+            Console.WriteLine("✅ Tag limpiado y desasignado en backend.");
+            await connection.InvokeAsync("SendTagEvent", "TagLimpiado", "✅ Tag limpiado y desasignado correctamente.");
+            await connection.InvokeAsync("SendOperationSuccess", "Tag limpiado y desasignado.", codigoActual);
+        }
+
+        currentMode = AgentMode.CONTINUOUS_READ;
+        Console.WriteLine("🔁 Volviendo a modo lectura.");
     }
+
 
     // === REGISTRO EN BACKEND ===
     private static async Task RegistrarTagEnBackend(string codigo)
@@ -202,6 +232,36 @@ class Program
             Console.WriteLine($"❌ Error registrando tag: {ex.Message}");
         }
     }
+
+    private static async Task<bool> EliminarTagEnBackend(string codigo)
+    {
+        try
+        {
+            using var client = new HttpClient { BaseAddress = new Uri("https://localhost:7280/") };
+
+            var url = $"api/TagAsignado/by-codigo?codigoTag={Uri.EscapeDataString(codigo)}";
+            var response = await client.DeleteAsync(url);
+
+            var respuesta = await response.Content.ReadAsStringAsync();
+
+            if (response.IsSuccessStatusCode)
+            {
+                Console.WriteLine($"🟢 Tag eliminado en backend: {respuesta}");
+                return true;
+            }
+            else
+            {
+                Console.WriteLine($"⚠️ Falló la eliminación del tag en backend: {respuesta}");
+                return false;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"❌ Error eliminando tag en backend: {ex.Message}");
+            return false;
+        }
+    }
+
 
     // === UTILIDADES ===
     private static string? LeerContenidoDelTag(ISCardReader reader)
