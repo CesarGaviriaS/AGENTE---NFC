@@ -28,7 +28,7 @@ class Program
 
     static async Task Main(string[] args)
     {
-        Console.WriteLine("--- Agente NFC v10.1 (con mensajes visuales y registros corregidos) ---");
+        Console.WriteLine("--- Agente NFC v10.1 ---");
 
         const string hubUrl = "https://localhost:7280/nfcHub";
         connection = new HubConnectionBuilder()
