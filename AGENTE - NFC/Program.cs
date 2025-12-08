@@ -162,13 +162,30 @@ class Program
     private static async Task HandleClean(ISCardReader reader)
     {
         Console.WriteLine("🧹 Limpiando tag...");
+        
+        // ✅ PRIMERO: Leer el código del tag antes de limpiarlo
+        string? tagCode = LeerContenidoDelTag(reader);
+        
         bool success = EscribirContenidoEnTag(reader, "");
         if (success)
         {
-            Console.WriteLine("✅ Tag limpiado.");
+            Console.WriteLine("✅ Tag limpiado físicamente.");
             await connection.InvokeAsync("SendTagEvent", "TagLimpiado", "✅ Tag limpiado correctamente.");
             await connection.InvokeAsync("SendOperationSuccess", "Tag limpiado.", "");
+            
+            // ✅ NUEVO: Notificar al backend con el código para eliminar de BD
+            if (!string.IsNullOrEmpty(tagCode))
+            {
+                Console.WriteLine($"📡 Enviando código del tag limpiado: {tagCode}");
+                await connection.InvokeAsync("SendTagCleanedSuccess", tagCode);
+            }
+            
             currentMode = AgentMode.CONTINUOUS_READ;
+        }
+        else
+        {
+            Console.WriteLine("❌ Error al limpiar tag.");
+            await connection.InvokeAsync("SendTagEvent", "TagLimpiado", "❌ Error al limpiar tag.");
         }
     }
 
