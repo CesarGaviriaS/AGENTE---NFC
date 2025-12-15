@@ -30,7 +30,7 @@ class Program
     {
         Console.WriteLine("--- Agente NFC v10.1 ---");
 
-        const string hubUrl = "https://localhost:7280/nfcHub";
+        const string hubUrl = "http://localhost:5075/nfcHub";
         connection = new HubConnectionBuilder()
             .WithUrl(hubUrl)
             .WithAutomaticReconnect()
