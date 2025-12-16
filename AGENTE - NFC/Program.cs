@@ -286,16 +286,56 @@ class Program
 
     private static async Task ConnectToHub()
     {
-        try
+        int intentos = 0;
+        const int maxIntentos = 5;
+        
+        while (intentos < maxIntentos)
         {
-            await connection.StartAsync();
-            Console.WriteLine("✅ Conectado al Hub NFC.");
-        }
-        catch
-        {
-            Console.WriteLine("❌ Error al conectar. Reintentando...");
-            await Task.Delay(5000);
-            await ConnectToHub();
+            try
+            {
+                intentos++;
+                Console.WriteLine($"🔄 Intentando conectar al Hub NFC... (Intento {intentos}/{maxIntentos})");
+                
+                await connection.StartAsync();
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine("✅ Conectado al Hub NFC exitosamente.");
+                Console.ResetColor();
+                return;
+            }
+            catch (Exception ex)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"❌ Error al conectar (Intento {intentos}/{maxIntentos}): {ex.Message}");
+                Console.ResetColor();
+                
+                if (intentos < maxIntentos)
+                {
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine("⏳ Reintentando en 3 segundos...");
+                    Console.ResetColor();
+                    await Task.Delay(3000);
+                }
+                else
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine("\n⚠️ ============================================");
+                    Console.WriteLine("⚠️  NO SE PUDO CONECTAR A LA API");
+                    Console.WriteLine("⚠️ ============================================");
+                    Console.WriteLine("⚠️  Asegúrate de que la API esté ejecutándose en:");
+                    Console.WriteLine("⚠️  http://localhost:5075");
+                    Console.WriteLine("⚠️ ");
+                    Console.WriteLine("⚠️  Para iniciar la API, ejecuta:");
+                    Console.WriteLine("⚠️  cd API---NFC-copy/API_NFC");
+                    Console.WriteLine("⚠️  dotnet run");
+                    Console.WriteLine("⚠️ ============================================\n");
+                    Console.ResetColor();
+                    
+                    // Esperar y reintentar automáticamente
+                    Console.WriteLine("🔄 Esperando 10 segundos antes de reintentar...");
+                    await Task.Delay(10000);
+                    intentos = 0; // Reiniciar contador para continuar intentando
+                }
+            }
         }
     }
 }
