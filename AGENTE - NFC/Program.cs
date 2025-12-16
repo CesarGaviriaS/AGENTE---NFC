@@ -30,7 +30,7 @@ class Program
     {
         Console.WriteLine("--- Agente NFC v10.1 ---");
 
-        const string hubUrl = "http://localhost:5075/nfcHub";
+        const string hubUrl = "https://api-nfc.onrender.com/nfcHub";
         connection = new HubConnectionBuilder()
             .WithUrl(hubUrl)
             .WithAutomaticReconnect()
@@ -194,7 +194,7 @@ class Program
     {
         try
         {
-            using var client = new HttpClient { BaseAddress = new Uri("https://localhost:7280/") };
+            using var client = new HttpClient { BaseAddress = new Uri("https://api-nfc.onrender.com/") };
 
             var partes = codigo.Split(',');
             if (partes.Length != 2) return;
